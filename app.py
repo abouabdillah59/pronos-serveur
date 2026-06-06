@@ -152,11 +152,21 @@ def fetch_friendlies():
     if body.get("pin") != ADMIN_PIN:
         return jsonify(error="code admin incorrect"), 403
 
-    # récupère tous les événements des dates concernées (une seule fois par date)
-    all_dates = sorted({d for f in FRIENDLIES_FETCH for d in f["dates"]})
+    # fenêtre de dates élargie (±1 jour) pour absorber les décalages de fuseau
+    from datetime import datetime, timedelta
+    base = sorted({d for f in FRIENDLIES_FETCH for d in f["dates"]})
+    dates = set()
+    for d in base:
+        try:
+            dt = datetime.strptime(d, "%Y-%m-%d")
+            for off in (-1, 0, 1):
+                dates.add((dt + timedelta(days=off)).strftime("%Y-%m-%d"))
+        except Exception:
+            dates.add(d)
+
     events = []
     errors = []
-    for d in all_dates:
+    for d in sorted(dates):
         try:
             events.extend(_fetch_events_for_date(d))
         except Exception as e:
@@ -177,7 +187,13 @@ def fetch_friendlies():
         data["friendlyResults"] = fr
         save(data)
 
-    return jsonify(ok=True, updated=updated, count=len(updated), errors=errors)
+    # rapport de diagnostic : ce que l'API a réellement renvoyé
+    sample = [
+        f"{e.get('strHomeTeam')} {e.get('intHomeScore')}-{e.get('intAwayScore')} {e.get('strAwayTeam')}"
+        for e in events[:25]
+    ]
+    return jsonify(ok=True, updated=updated, count=len(updated),
+                   events_seen=len(events), sample=sample, errors=errors)
 
 
 if __name__ == "__main__":
