@@ -105,6 +105,81 @@ def post_results():
     return jsonify(ok=True)
 
 
+# ============================================================
+#  UPDATE AUTOMATIQUE DES AMICAUX DE TEST (via TheSportsDB, gratuit)
+#  Le serveur va chercher les scores réels et remplit friendlyResults.
+# ============================================================
+import urllib.request
+
+THESPORTSDB_KEY = os.environ.get("THESPORTSDB_KEY", "123")  # clé de test gratuite
+
+# Mapping des amicaux de test : id -> date (UTC) + noms d'équipes (alias EN)
+FRIENDLIES_FETCH = [
+    {"id": "f1", "dates": ["2026-06-03"], "home": ["netherlands", "holland"], "away": ["algeria"]},
+    {"id": "f2", "dates": ["2026-06-03"], "home": ["luxembourg"], "away": ["italy"]},
+    {"id": "f3", "dates": ["2026-06-03"], "home": ["poland"], "away": ["nigeria"]},
+    {"id": "f4", "dates": ["2026-06-03"], "home": ["denmark"], "away": ["dr congo", "congo dr", "democratic republic"]},
+    {"id": "f5", "dates": ["2026-06-04"], "home": ["france"], "away": ["ivory coast", "cote d'ivoire", "côte d'ivoire"]},
+    {"id": "f6", "dates": ["2026-06-04"], "home": ["spain"], "away": ["iraq"]},
+    {"id": "f7", "dates": ["2026-06-04"], "home": ["sweden"], "away": ["greece"]},
+    {"id": "f8", "dates": ["2026-06-04"], "home": ["northern ireland"], "away": ["guinea"]},
+]
+
+
+def _norm(s):
+    return (s or "").strip().lower()
+
+
+def _matches(name, aliases):
+    n = _norm(name)
+    return any(a in n or n in a for a in aliases)
+
+
+def _fetch_events_for_date(date):
+    url = (
+        f"https://www.thesportsdb.com/api/v1/json/{THESPORTSDB_KEY}"
+        f"/eventsday.php?d={date}&s=Soccer"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "pronos-mondial"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        data = json.load(r)
+    return data.get("events") or []
+
+
+@app.post("/fetch-friendlies")
+def fetch_friendlies():
+    body = request.get_json(silent=True) or {}
+    if body.get("pin") != ADMIN_PIN:
+        return jsonify(error="code admin incorrect"), 403
+
+    # récupère tous les événements des dates concernées (une seule fois par date)
+    all_dates = sorted({d for f in FRIENDLIES_FETCH for d in f["dates"]})
+    events = []
+    errors = []
+    for d in all_dates:
+        try:
+            events.extend(_fetch_events_for_date(d))
+        except Exception as e:
+            errors.append(f"{d}: {e}")
+
+    updated = []
+    with LOCK:
+        data = load()
+        fr = data.get("friendlyResults", {})
+        for f in FRIENDLIES_FETCH:
+            for ev in events:
+                if _matches(ev.get("strHomeTeam"), f["home"]) and _matches(ev.get("strAwayTeam"), f["away"]):
+                    hs, as_ = ev.get("intHomeScore"), ev.get("intAwayScore")
+                    if hs is not None and as_ is not None and str(hs) != "" and str(as_) != "":
+                        fr[f["id"]] = {"h": int(hs), "a": int(as_)}
+                        updated.append(f["id"])
+                    break
+        data["friendlyResults"] = fr
+        save(data)
+
+    return jsonify(ok=True, updated=updated, count=len(updated), errors=errors)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
