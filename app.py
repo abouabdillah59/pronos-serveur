@@ -105,6 +105,17 @@ def post_results():
     return jsonify(ok=True)
 
 
+# --- L'admin remet TOUT à zéro ---
+@app.post("/reset")
+def reset_all():
+    body = request.get_json(silent=True) or {}
+    if body.get("pin") != ADMIN_PIN:
+        return jsonify(error="code admin incorrect"), 403
+    with LOCK:
+        save(_empty())
+    return jsonify(ok=True)
+
+
 # ============================================================
 #  UPDATE AUTOMATIQUE — via API-Football (api-sports.io)
 #  Clé gratuite à mettre dans la variable d'environnement API_FOOTBALL_KEY (sur Render).
@@ -125,6 +136,12 @@ FRIENDLIES_FETCH = [
     {"id": "f7", "dates": ["2026-06-04"], "home": ["sweden"], "away": ["greece"]},
     {"id": "f8", "dates": ["2026-06-04"], "home": ["northern ireland"], "away": ["guinea"]},
     {"id": "f9", "dates": ["2026-06-08"], "home": ["france"], "away": ["northern ireland"]},
+    {"id": "f10", "dates": ["2026-06-07"], "home": ["morocco"], "away": ["norway"]},
+    {"id": "f11", "dates": ["2026-06-08"], "home": ["netherlands", "holland"], "away": ["uzbekistan"]},
+    {"id": "f12", "dates": ["2026-06-08"], "home": ["dr congo", "congo dr", "democratic republic"], "away": ["chile"]},
+    {"id": "f13", "dates": ["2026-06-09"], "home": ["portugal"], "away": ["nigeria"]},
+    {"id": "f14", "dates": ["2026-06-09", "2026-06-10"], "home": ["argentina"], "away": ["iceland"]},
+    {"id": "f15", "dates": ["2026-06-10"], "home": ["england"], "away": ["costa rica"]},
 ]
 
 
@@ -229,6 +246,102 @@ def fetch_friendlies():
     ]
     return jsonify(ok=True, updated=updated, count=len(updated),
                    events_seen=len(events), sample=sample, errors=errors)
+
+
+# ============================================================
+#  UPDATE AUTOMATIQUE DU MONDIAL — via openfootball/worldcup.json
+#  Source publique, GRATUITE, SANS CLÉ. Remplit les résultats de poule A1..L6.
+# ============================================================
+WC_URL = "https://raw.githubusercontent.com/openfootball/worldcup.json/master/2026/worldcup.json"
+
+# Équipes par groupe en anglais (ordre de tête de série), noms EXACTS d'openfootball
+GROUPS_EN = {
+    "A": ["Mexico", "South Africa", "South Korea", "Czech Republic"],
+    "B": ["Canada", "Bosnia & Herzegovina", "Qatar", "Switzerland"],
+    "C": ["Brazil", "Morocco", "Haiti", "Scotland"],
+    "D": ["USA", "Paraguay", "Australia", "Turkey"],
+    "E": ["Germany", "Curaçao", "Ivory Coast", "Ecuador"],
+    "F": ["Netherlands", "Japan", "Sweden", "Tunisia"],
+    "G": ["Belgium", "Egypt", "Iran", "New Zealand"],
+    "H": ["Spain", "Cape Verde", "Saudi Arabia", "Uruguay"],
+    "I": ["France", "Senegal", "Iraq", "Norway"],
+    "J": ["Argentina", "Algeria", "Austria", "Jordan"],
+    "K": ["Portugal", "DR Congo", "Uzbekistan", "Colombia"],
+    "L": ["England", "Croatia", "Ghana", "Panama"],
+}
+_PAIRS = [[0, 1], [2, 3], [0, 2], [3, 1], [3, 0], [1, 2]]
+
+
+def _wc_fixtures():
+    """Reproduit exactement les affiches de l'appli : id A1..L6 -> (home, away) en anglais."""
+    fx = {}
+    for g, teams in GROUPS_EN.items():
+        for i, (x, y) in enumerate(_PAIRS):
+            fx[f"{g}{i+1}"] = (teams[x], teams[y])
+    return fx
+
+
+def _load_worldcup():
+    req = urllib.request.Request(WC_URL, headers={"User-Agent": "pronos-mondial"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.load(r)
+
+
+@app.post("/test-worldcup")
+def test_worldcup():
+    body = request.get_json(silent=True) or {}
+    if body.get("pin") != ADMIN_PIN:
+        return jsonify(error="code admin incorrect"), 403
+    try:
+        data = _load_worldcup()
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
+    matches = data.get("matches", [])
+    played = [m for m in matches if "score" in m]
+    sample = [f"{m['team1']} vs {m['team2']} ({m.get('date')})" for m in matches[:8]]
+    return jsonify(ok=True, total=len(matches), played=len(played), sample=sample)
+
+
+@app.post("/fetch-worldcup")
+def fetch_worldcup():
+    body = request.get_json(silent=True) or {}
+    if body.get("pin") != ADMIN_PIN:
+        return jsonify(error="code admin incorrect"), 403
+    try:
+        data = _load_worldcup()
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
+
+    fx = _wc_fixtures()
+    # index inverse : paire d'équipes (minuscules) -> (id, nom du home)
+    rev = {}
+    for mid, (h, a) in fx.items():
+        rev[frozenset((h.lower(), a.lower()))] = (mid, h.lower())
+
+    updated = []
+    with LOCK:
+        d = load()
+        res = d.get("results", {})
+        for m in data.get("matches", []):
+            if not str(m.get("group", "")).startswith("Group"):
+                continue
+            if "score" not in m or not m["score"].get("ft"):
+                continue
+            t1, t2 = m.get("team1", "").lower(), m.get("team2", "").lower()
+            key = frozenset((t1, t2))
+            if key in rev:
+                mid, home = rev[key]
+                ft = m["score"]["ft"]  # [score team1, score team2]
+                if home == t1:
+                    hh, aa = ft[0], ft[1]
+                else:
+                    hh, aa = ft[1], ft[0]
+                res[mid] = {"h": int(hh), "a": int(aa)}
+                updated.append(mid)
+        d["results"] = res
+        save(d)
+
+    return jsonify(ok=True, updated=updated, count=len(updated))
 
 
 if __name__ == "__main__":
