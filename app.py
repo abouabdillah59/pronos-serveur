@@ -106,14 +106,15 @@ def post_results():
 
 
 # ============================================================
-#  UPDATE AUTOMATIQUE DES AMICAUX DE TEST (via TheSportsDB, gratuit)
-#  Le serveur va chercher les scores réels et remplit friendlyResults.
+#  UPDATE AUTOMATIQUE — via API-Football (api-sports.io)
+#  Clé gratuite à mettre dans la variable d'environnement API_FOOTBALL_KEY (sur Render).
 # ============================================================
 import urllib.request
 
-THESPORTSDB_KEY = os.environ.get("THESPORTSDB_KEY", "123")  # clé de test gratuite
+API_KEY = os.environ.get("API_FOOTBALL_KEY", "")  # <-- à définir sur Render
+API_HOST = "v3.football.api-sports.io"
 
-# Mapping des amicaux de test : id -> date (UTC) + noms d'équipes (alias EN)
+# Mapping des amicaux de test : id -> dates + noms d'équipes (alias, en minuscules)
 FRIENDLIES_FETCH = [
     {"id": "f1", "dates": ["2026-06-03"], "home": ["netherlands", "holland"], "away": ["algeria"]},
     {"id": "f2", "dates": ["2026-06-03"], "home": ["luxembourg"], "away": ["italy"]},
@@ -123,6 +124,7 @@ FRIENDLIES_FETCH = [
     {"id": "f6", "dates": ["2026-06-04"], "home": ["spain"], "away": ["iraq"]},
     {"id": "f7", "dates": ["2026-06-04"], "home": ["sweden"], "away": ["greece"]},
     {"id": "f8", "dates": ["2026-06-04"], "home": ["northern ireland"], "away": ["guinea"]},
+    {"id": "f9", "dates": ["2026-06-08"], "home": ["france"], "away": ["northern ireland"]},
 ]
 
 
@@ -135,15 +137,48 @@ def _matches(name, aliases):
     return any(a in n or n in a for a in aliases)
 
 
-def _fetch_events_for_date(date):
-    url = (
-        f"https://www.thesportsdb.com/api/v1/json/{THESPORTSDB_KEY}"
-        f"/eventsday.php?d={date}&s=Soccer"
-    )
-    req = urllib.request.Request(url, headers={"User-Agent": "pronos-mondial"})
-    with urllib.request.urlopen(req, timeout=15) as r:
+def _api_get(path):
+    if not API_KEY:
+        raise RuntimeError("API_FOOTBALL_KEY manquante (à définir sur Render)")
+    url = f"https://{API_HOST}/{path}"
+    req = urllib.request.Request(url, headers={"x-apisports-key": API_KEY})
+    with urllib.request.urlopen(req, timeout=20) as r:
         data = json.load(r)
-    return data.get("events") or []
+    return data.get("response", [])
+
+
+def _fetch_events_for_date(date):
+    resp = _api_get(f"fixtures?date={date}")
+    out = []
+    for it in resp:
+        teams = it.get("teams", {})
+        goals = it.get("goals", {})
+        status = (it.get("fixture", {}).get("status", {}) or {}).get("short")
+        out.append({
+            "strHomeTeam": (teams.get("home") or {}).get("name"),
+            "strAwayTeam": (teams.get("away") or {}).get("name"),
+            "intHomeScore": goals.get("home"),
+            "intAwayScore": goals.get("away"),
+            "status": status,
+        })
+    return out
+
+
+@app.post("/test-connection")
+def test_connection():
+    body = request.get_json(silent=True) or {}
+    if body.get("pin") != ADMIN_PIN:
+        return jsonify(error="code admin incorrect"), 403
+    date = body.get("date", "2026-06-04")
+    try:
+        events = _fetch_events_for_date(date)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
+    sample = [
+        f"{e['strHomeTeam']} {e['intHomeScore']}-{e['intAwayScore']} {e['strAwayTeam']} [{e['status']}]"
+        for e in events[:25]
+    ]
+    return jsonify(ok=True, date=date, events_seen=len(events), sample=sample)
 
 
 @app.post("/fetch-friendlies")
